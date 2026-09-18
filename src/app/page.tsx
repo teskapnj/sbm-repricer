@@ -499,6 +499,26 @@ export default function Home() {
       });
   
       const data = await response.json();
+
+      if (response.ok && data?.success) {
+        try {
+          await fetch("/api/repricing-reports", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              source: "manual",
+              result: data,
+            }),
+          });
+        } catch (reportError) {
+          console.error(
+            "Unable to save repricing report:",
+            reportError,
+          );
+        }
+      }
   
       if (!response.ok || !data.success) {
         throw new Error(data.error || "Unable to save pricing.");
@@ -856,6 +876,13 @@ export default function Home() {
               className="block rounded-xl px-4 py-3 text-sm text-slate-300 hover:bg-white/5"
             >
               Price Errors
+            </Link>
+
+            <Link
+              href="/reports"
+              className="block rounded-xl px-4 py-3 text-sm text-slate-300 hover:bg-white/5"
+            >
+              Reports
             </Link>
 
             <Link
