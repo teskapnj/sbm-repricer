@@ -54,6 +54,32 @@ type ProductsResponse = {
   error?: string;
 };
 
+type RepricingCycleLiveResponse = {
+  success: boolean;
+  activeProducts?: number;
+  counts?: {
+    wouldUpdate?: number;
+    noChange?: number;
+    skipped?: number;
+    fbmNeedsShipping?: number;
+    invalidSetup?: number;
+  };
+  liveSummary?: {
+    candidates?: number;
+    submitted?: number;
+    failed?: number;
+  };
+  error?: string;
+};
+
+type RepricingRunSummary = {
+  checked: number;
+  updated: number;
+  noChange: number;
+  skipped: number;
+  failed: number;
+};
+
 async function fetchStoredProducts() {
   const response = await fetch("/api/products", {
     method: "GET",
@@ -156,6 +182,11 @@ export default function Home() {
   const [amazonBuyableCount, setAmazonBuyableCount] = useState(0);
   const [syncDurationMs, setSyncDurationMs] = useState<number | null>(null);
 
+  const [repricingRunning, setRepricingRunning] = useState(false);
+  const [repricingError, setRepricingError] = useState("");
+  const [repricingResult, setRepricingResult] =
+    useState<RepricingRunSummary | null>(null);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -240,6 +271,68 @@ export default function Home() {
       setSyncError(error instanceof Error ? error.message : "Amazon sync failed.");
     } finally {
       setSyncing(false);
+    }
+  }
+
+  async function runReprice() {
+    if (repricingRunning || syncing) return;
+
+    const enabledCount = products.filter((product) => product.repricing).length;
+
+    if (enabledCount === 0) {
+      alert("No products have Repricing ON.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Run LIVE repricing for ${enabledCount} product${
+        enabledCount === 1 ? "" : "s"
+      } with Repricing ON? Amazon prices may change.`,
+    );
+
+    if (!confirmed) return;
+
+    setRepricingRunning(true);
+    setRepricingError("");
+    setRepricingResult(null);
+
+    try {
+      const response = await fetch("/api/repricing-cycle-live", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          confirm: "LIVE",
+        }),
+        cache: "no-store",
+      });
+
+      const data = (await response.json()) as RepricingCycleLiveResponse;
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || "Live repricing failed.");
+      }
+
+      const counts = data.counts || {};
+      const liveSummary = data.liveSummary || {};
+
+      setRepricingResult({
+        checked: data.activeProducts ?? enabledCount,
+        updated: liveSummary.submitted ?? 0,
+        noChange: counts.noChange ?? 0,
+        skipped:
+          (counts.skipped ?? 0) +
+          (counts.fbmNeedsShipping ?? 0) +
+          (counts.invalidSetup ?? 0),
+        failed: liveSummary.failed ?? 0,
+      });
+    } catch (error) {
+      setRepricingError(
+        error instanceof Error ? error.message : "Live repricing failed.",
+      );
+    } finally {
+      setRepricingRunning(false);
     }
   }
 
@@ -800,6 +893,20 @@ export default function Home() {
 
               <button
                 type="button"
+                onClick={runReprice}
+                disabled={repricingRunning || syncing || activeCount === 0}
+                title={
+                  activeCount === 0
+                    ? "Turn Repricing ON for at least one product first"
+                    : "Run live repricing for all products with Repricing ON"
+                }
+                className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-900 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+              >
+                {repricingRunning ? "Running Reprice..." : "Run Reprice"}
+              </button>
+
+              <button
+                type="button"
                 onClick={syncAmazon}
                 disabled={syncing}
                 className="rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
@@ -865,6 +972,33 @@ export default function Home() {
                     {syncDurationMs !== null
                       ? ` • ${(syncDurationMs / 1000).toFixed(1)} sec Amazon sync`
                       : ""}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {(repricingRunning || repricingError || repricingResult) && (
+              <div className="mt-5 rounded-2xl border border-slate-200 bg-white px-5 py-4 text-sm shadow-sm">
+                {repricingRunning && (
+                  <div className="font-medium text-slate-700">
+                    Running live repricing for products with Repricing ON...
+                  </div>
+                )}
+
+                {!repricingRunning && repricingError && (
+                  <div className="font-medium text-red-700">
+                    Repricing failed: {repricingError}
+                  </div>
+                )}
+
+                {!repricingRunning && !repricingError && repricingResult && (
+                  <div className="text-slate-700">
+                    <span className="font-semibold">Repricing complete</span>
+                    {` • Checked: ${repricingResult.checked}`}
+                    {` • Updated: ${repricingResult.updated}`}
+                    {` • No change: ${repricingResult.noChange}`}
+                    {` • Skipped: ${repricingResult.skipped}`}
+                    {` • Failed: ${repricingResult.failed}`}
                   </div>
                 )}
               </div>
