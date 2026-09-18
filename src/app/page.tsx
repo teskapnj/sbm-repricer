@@ -163,6 +163,9 @@ export default function Home() {
   const [pageSize, setPageSize] = useState<50 | 100 | 500>(50);
   const [currentPage, setCurrentPage] = useState(1);
   const [dateSort, setDateSort] = useState<"NEWEST" | "OLDEST">("NEWEST");
+  const [statFilter, setStatFilter] = useState<
+    "ALL" | "FBA" | "FBM" | "REPRICING"
+  >("ALL");
 
   const [selectedSkus, setSelectedSkus] = useState<string[]>([]);
   const [bulkOpen, setBulkOpen] = useState(false);
@@ -688,7 +691,20 @@ export default function Home() {
           fulfillmentFilter === "ALL" ||
           product.fulfillment === fulfillmentFilter;
 
-        return matchesSearch && matchesFulfillment;
+        const matchesStatFilter =
+          statFilter === "ALL" ||
+          (statFilter === "FBA" &&
+            product.fulfillment === "FBA") ||
+          (statFilter === "FBM" &&
+            product.fulfillment === "FBM") ||
+          (statFilter === "REPRICING" &&
+            product.repricing);
+
+        return (
+          matchesSearch &&
+          matchesFulfillment &&
+          matchesStatFilter
+        );
       })
       .sort((a, b) => {
         const aTime = a.createdDate ? new Date(a.createdDate).getTime() : 0;
@@ -696,7 +712,13 @@ export default function Home() {
 
         return dateSort === "NEWEST" ? bTime - aTime : aTime - bTime;
       });
-  }, [products, search, fulfillmentFilter, dateSort]);
+  }, [
+    products,
+    search,
+    fulfillmentFilter,
+    dateSort,
+    statFilter,
+  ]);
 
   const totalPages = Math.max(1, Math.ceil(filteredProducts.length / pageSize));
   const safeCurrentPage = Math.min(currentPage, totalPages);
@@ -966,24 +988,48 @@ export default function Home() {
                 title="Available SKUs"
                 value={products.length.toString()}
                 subtitle="Synced from Amazon"
+                active={statFilter === "ALL"}
+                onClick={() => {
+                  setStatFilter("ALL");
+                  setFulfillmentFilter("ALL");
+                  setCurrentPage(1);
+                }}
               />
 
               <StatCard
                 title="FBA Available"
                 value={fbaCount.toString()}
                 subtitle="Amazon fulfilled"
+                active={statFilter === "FBA"}
+                onClick={() => {
+                  setStatFilter("FBA");
+                  setFulfillmentFilter("ALL");
+                  setCurrentPage(1);
+                }}
               />
 
               <StatCard
                 title="FBM Available"
                 value={fbmCount.toString()}
                 subtitle="Merchant fulfilled"
+                active={statFilter === "FBM"}
+                onClick={() => {
+                  setStatFilter("FBM");
+                  setFulfillmentFilter("ALL");
+                  setCurrentPage(1);
+                }}
               />
 
               <StatCard
                 title="Repricing Enabled"
                 value={activeCount.toString()}
-                subtitle="Min / max configured"
+                subtitle="Currently active"
+                active={statFilter === "REPRICING"}
+                onClick={() => {
+                  setStatFilter("REPRICING");
+                  setFulfillmentFilter("ALL");
+                  setCurrentPage(1);
+                }}
               />
             </section>
 
@@ -1749,17 +1795,45 @@ function StatCard({
   title,
   value,
   subtitle,
+  active,
+  onClick,
 }: {
   title: string;
   value: string;
   subtitle: string;
+  active: boolean;
+  onClick: () => void;
 }) {
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-      <div className="text-sm font-medium text-slate-500">{title}</div>
-      <div className="mt-3 text-3xl font-semibold tracking-tight">{value}</div>
-      <div className="mt-2 text-sm text-slate-400">{subtitle}</div>
-    </div>
+    <button
+      type="button"
+      onClick={onClick}
+      className={`w-full rounded-2xl border p-6 text-left shadow-sm transition ${
+        active
+          ? "border-slate-950 bg-slate-950 text-white"
+          : "border-slate-200 bg-white hover:border-slate-400 hover:shadow-md"
+      }`}
+    >
+      <div
+        className={`text-sm font-medium ${
+          active ? "text-slate-300" : "text-slate-500"
+        }`}
+      >
+        {title}
+      </div>
+
+      <div className="mt-3 text-3xl font-semibold tracking-tight">
+        {value}
+      </div>
+
+      <div
+        className={`mt-2 text-sm ${
+          active ? "text-slate-400" : "text-slate-400"
+        }`}
+      >
+        {subtitle}
+      </div>
+    </button>
   );
 }
 
