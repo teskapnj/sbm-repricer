@@ -73,11 +73,15 @@ type RepricingCycleLiveResponse = {
 };
 
 type RepricingRunSummary = {
+  mode: "PREVIEW" | "LIVE";
   checked: number;
+  wouldUpdate: number;
   updated: number;
   noChange: number;
   skipped: number;
   failed: number;
+  durationMs: number | null;
+  fetchErrors: number;
 };
 
 async function fetchStoredProducts() {
@@ -277,6 +281,56 @@ export default function Home() {
     }
   }
 
+  async function runPreview() {
+    if (repricingRunning || syncing) return;
+
+    setRepricingRunning(true);
+    setRepricingError("");
+    setRepricingResult(null);
+
+    try {
+      const response = await fetch("/api/repricing-cycle-preview", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ source: "ui-preview" }),
+        cache: "no-store",
+      });
+
+      const data = (await response.json()) as any;
+
+      if (!response.ok) {
+        throw new Error(data?.error || "Preview failed.");
+      }
+
+      const counts = data.counts || {};
+
+      setRepricingResult({
+        mode: "PREVIEW",
+        checked: data.activeProducts ?? 0,
+        wouldUpdate: counts.wouldUpdate ?? 0,
+        updated: 0,
+        noChange: counts.noChange ?? 0,
+        skipped:
+          (counts.skipped ?? 0) +
+          (counts.fbmNeedsShipping ?? 0) +
+          (counts.invalidSetup ?? 0),
+        failed: 0,
+        durationMs: data.durationMs ?? null,
+        fetchErrors: Array.isArray(data.fetchErrors)
+          ? data.fetchErrors.length
+          : 0,
+      });
+    } catch (error) {
+      setRepricingError(
+        error instanceof Error ? error.message : "Preview failed.",
+      );
+    } finally {
+      setRepricingRunning(false);
+    }
+  }
+
   async function runReprice() {
     if (repricingRunning || syncing) return;
 
@@ -321,7 +375,9 @@ export default function Home() {
       const liveSummary = data.liveSummary || {};
 
       setRepricingResult({
+        mode: "LIVE",
         checked: data.activeProducts ?? enabledCount,
+        wouldUpdate: (counts as any).wouldUpdate ?? 0,
         updated: liveSummary.submitted ?? 0,
         noChange: counts.noChange ?? 0,
         skipped:
@@ -329,6 +385,10 @@ export default function Home() {
           (counts.fbmNeedsShipping ?? 0) +
           (counts.invalidSetup ?? 0),
         failed: liveSummary.failed ?? 0,
+        durationMs: (data as any).durationMs ?? null,
+        fetchErrors: Array.isArray((data as any).fetchErrors)
+          ? (data as any).fetchErrors.length
+          : 0,
       });
     } catch (error) {
       setRepricingError(
@@ -503,27 +563,7 @@ export default function Home() {
   
       const data = await response.json();
 
-      if (response.ok && data?.success) {
-        try {
-          await fetch("/api/repricing-reports", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              source: "manual",
-              result: data,
-            }),
-          });
-        } catch (reportError) {
-          console.error(
-            "Unable to save repricing report:",
-            reportError,
-          );
-        }
-      }
-  
-      if (!response.ok || !data.success) {
+        if (!response.ok || !data.success) {
         throw new Error(data.error || "Unable to save pricing.");
       }
   
@@ -959,6 +999,16 @@ export default function Home() {
 
               <button
                 type="button"
+                onClick={runPreview}
+                disabled={repricingRunning || syncing}
+                title="Dry run: calculates target prices without sending anything to Amazon"
+                className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+              >
+                {repricingRunning ? "Working..." : "Preview (Dry Run)"}
+              </button>
+
+              <button
+                type="button"
                 onClick={runReprice}
                 disabled={repricingRunning || syncing || activeCount === 0}
                 title={
@@ -1071,7 +1121,7 @@ export default function Home() {
               <div className="mt-5 rounded-2xl border border-slate-200 bg-white px-5 py-4 text-sm shadow-sm">
                 {repricingRunning && (
                   <div className="font-medium text-slate-700">
-                    Running live repricing for products with Repricing ON...
+                    Working on products with Repricing ON...
                   </div>
                 )}
 
@@ -1083,12 +1133,36 @@ export default function Home() {
 
                 {!repricingRunning && !repricingError && repricingResult && (
                   <div className="text-slate-700">
-                    <span className="font-semibold">Repricing complete</span>
+                    <span className="font-semibold">
+                      {repricingResult.mode === "PREVIEW"
+                        ? "Preview complete (nothing sent to Amazon)"
+                        : "Repricing complete"}
+                    </span>
                     {` • Checked: ${repricingResult.checked}`}
-                    {` • Updated: ${repricingResult.updated}`}
+                    {repricingResult.mode === "PREVIEW"
+                      ? ` • Would update: ${repricingResult.wouldUpdate}`
+                      : ` • Updated: ${repricingResult.updated}`}
                     {` • No change: ${repricingResult.noChange}`}
                     {` • Skipped: ${repricingResult.skipped}`}
-                    {` • Failed: ${repricingResult.failed}`}
+                    {repricingResult.mode === "LIVE" &&
+                      ` • Failed: ${repricingResult.failed}`}
+                    {repricingResult.durationMs !== null &&
+                      ` • Took: ${(repricingResult.durationMs / 1000).toFixed(1)}s`}
+
+                    {repricingResult.fetchErrors > 0 && (
+                      <div className="mt-2 font-medium text-amber-700">
+                        {`${repricingResult.fetchErrors} Amazon pricing batch(es) failed — see the report for details.`}
+                      </div>
+                    )}
+
+                    <div className="mt-2">
+                      <a
+                        href="/reports"
+                        className="text-sm font-medium text-slate-900 underline"
+                      >
+                        Open report
+                      </a>
+                    </div>
                   </div>
                 )}
               </div>

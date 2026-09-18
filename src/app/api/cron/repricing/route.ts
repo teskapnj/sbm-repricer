@@ -1,116 +1,53 @@
 import { NextRequest, NextResponse } from "next/server";
 
-export async function GET(
-  request: NextRequest,
-) {
+import { runRepricingCycle } from "@/lib/repricing-cycle";
+
+export const dynamic = "force-dynamic";
+export const maxDuration = 300;
+
+export async function GET(request: NextRequest) {
   try {
-    const cronSecret =
-      process.env.CRON_SECRET;
+    const cronSecret = process.env.CRON_SECRET;
 
     if (!cronSecret) {
       return NextResponse.json(
-        {
-          success: false,
-          error:
-            "CRON_SECRET is not configured.",
-        },
-        {
-          status: 500,
-        },
+        { success: false, error: "CRON_SECRET is not configured." },
+        { status: 500 },
       );
     }
 
-    const authorization =
-      request.headers.get(
-        "authorization",
-      );
+    const authorization = request.headers.get("authorization");
 
-    if (
-      authorization !==
-      `Bearer ${cronSecret}`
-    ) {
+    if (authorization !== `Bearer ${cronSecret}`) {
       return NextResponse.json(
-        {
-          success: false,
-          error: "Unauthorized.",
-        },
-        {
-          status: 401,
-        },
+        { success: false, error: "Unauthorized." },
+        { status: 401 },
       );
     }
 
-    const liveUrl =
-      new URL(
-        "/api/repricing-cycle-live",
-        request.url,
-      );
+    // Runs the cycle in-process: no self-HTTP hop, so the cron
+    // function is no longer limited by a nested request timeout.
+    const result = await runRepricingCycle({
+      live: true,
+      source: "cron",
+    });
 
-    const response =
-      await fetch(
-        liveUrl,
-        {
-          method: "POST",
-
-          headers: {
-            "Content-Type":
-              "application/json",
-          },
-
-          body:
-            JSON.stringify({
-              confirm: "LIVE",
-            }),
-
-          cache: "no-store",
-        },
-      );
-
-    const result =
-      await response
-        .json()
-        .catch(() => ({
-          success: false,
-          error:
-            "Invalid response from repricing cycle.",
-        }));
-
-    return NextResponse.json(
-      {
-        success:
-          response.ok &&
-          result?.success === true,
-
-        cron: true,
-
-        repricing:
-          result,
-      },
-      {
-        status:
-          response.ok
-            ? 200
-            : response.status,
-      },
-    );
+    return NextResponse.json({
+      success: result.success,
+      cron: true,
+      repricing: result,
+    });
   } catch (error) {
-    console.error(
-      "Cron repricing failed:",
-      error,
-    );
+    console.error("Cron repricing failed:", error);
 
     return NextResponse.json(
       {
         success: false,
         cron: true,
         error:
-          error instanceof Error
-            ? error.message
-            : "Cron repricing failed.",
+          error instanceof Error ? error.message : "Cron repricing failed.",
       },
-      {
-        status: 500,
-      },
+      { status: 500 },
     );
   }
 }

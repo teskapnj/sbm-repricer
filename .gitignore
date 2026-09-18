@@ -39,3 +39,21 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local-only scratch: test endpoints and backups.
+# These are NOT deployed. API routes have no auth, so they
+# must never reach production.
+/src/app/api/amazon-price-validation-preview/
+/src/app/api/amazon-test/
+/src/app/api/buybox-rule-preview/
+/src/app/api/buybox-test/
+/src/app/api/check-amazon-price/
+/src/app/api/fba-inventory-test/
+/src/app/api/find-live-buybox-loser/
+/src/app/api/find-live-test-candidate/
+/src/app/api/find-used-buybox/
+/src/app/api/firestore-test/
+/src/app/api/price-error-preview/
+/src/app/api/price-errors-scan/
+/src/app/api/sp-api-test/
+/_scratch/
