@@ -825,6 +825,10 @@ export default function Home() {
               min: update.minPrice,
               max: update.maxPrice,
               status: "Ready",
+              pricingRule:
+                bulkRepricing === "ON"
+                  ? "BUY_BOX"
+                  : product.pricingRule,
               repricing:
                 bulkRepricing === "KEEP"
                   ? product.repricing
@@ -833,6 +837,19 @@ export default function Home() {
           }),
         );
     
+        const {
+          products: refreshedProducts,
+          latestSync,
+        } = await fetchStoredProducts();
+
+        setProducts(refreshedProducts);
+
+        if (latestSync) {
+          setLastSync(
+            new Date(latestSync).toLocaleTimeString(),
+          );
+        }
+
         setPreviewOpen(false);
         setBulkOpen(false);
         setSelectedSkus([]);

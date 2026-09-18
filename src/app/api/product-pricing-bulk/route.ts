@@ -1,44 +1,40 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase-admin";
 
-type PricingUpdate = {
-  sku: string;
-  minPrice: number;
-  maxPrice: number;
-};
-
-function chunkArray<T>(items: T[], size: number) {
-  const chunks: T[][] = [];
-
-  for (let i = 0; i < items.length; i += size) {
-    chunks.push(items.slice(i, i + size));
-  }
-
-  return chunks;
-}
-
 export async function POST(request: Request) {
   try {
     const body = await request.json();
 
-    if (!Array.isArray(body.items)) {
+    const items = Array.isArray(body?.items)
+      ? body.items
+      : [];
+
+    const repricingEnabled =
+      typeof body?.repricingEnabled === "boolean"
+        ? body.repricingEnabled
+        : null;
+
+    if (items.length === 0) {
       return NextResponse.json(
         {
           success: false,
-          error: "Items array is required.",
+          error: "No products supplied.",
         },
         { status: 400 },
       );
     }
 
-    const repricingEnabled =
-      typeof body.repricingEnabled === "boolean"
-        ? body.repricingEnabled
-        : null;
+    if (items.length > 500) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Maximum 500 products per bulk update.",
+        },
+        { status: 400 },
+      );
+    }
 
-    const items: PricingUpdate[] = [];
-
-    for (const item of body.items) {
+    const validatedItems = items.map((item: any) => {
       const sku =
         typeof item?.sku === "string"
           ? item.sku.trim()
@@ -47,86 +43,78 @@ export async function POST(request: Request) {
       const minPrice = Number(item?.minPrice);
       const maxPrice = Number(item?.maxPrice);
 
+      if (!sku) {
+        throw new Error("A product is missing SKU.");
+      }
+
       if (
-        !sku ||
         !Number.isFinite(minPrice) ||
         !Number.isFinite(maxPrice) ||
         minPrice < 0 ||
         maxPrice < 0 ||
         minPrice > maxPrice
       ) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: `Invalid pricing data for SKU: ${sku || "unknown"}`,
-          },
-          { status: 400 },
+        throw new Error(
+          `Invalid Min/Max for SKU ${sku}.`,
         );
       }
 
-      items.push({
+      return {
         sku,
-        minPrice,
-        maxPrice,
+        minPrice: Number(minPrice.toFixed(2)),
+        maxPrice: Number(maxPrice.toFixed(2)),
+      };
+    });
+
+    const batch = db.batch();
+    const now = new Date().toISOString();
+
+    for (const item of validatedItems) {
+      const documentId =
+        Buffer.from(item.sku).toString("base64url");
+
+      const ref = db
+        .collection("sbm_repricer_products")
+        .doc(documentId);
+
+      const update: Record<string, unknown> = {
+        minPrice: item.minPrice,
+        maxPrice: item.maxPrice,
+        pricingUpdatedAt: now,
+      };
+
+      if (repricingEnabled !== null) {
+        update.repricingEnabled =
+          repricingEnabled;
+
+        // Repricing ON means this product must have
+        // a valid pricing rule as well.
+        if (repricingEnabled === true) {
+          update.pricingRule = "BUY_BOX";
+        }
+      }
+
+      batch.set(ref, update, {
+        merge: true,
       });
     }
 
-    if (items.length === 0) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "No products to update.",
-        },
-        { status: 400 },
-      );
-    }
-
-    const updatedAt = new Date().toISOString();
-    const chunks = chunkArray(items, 400);
-
-    for (const chunk of chunks) {
-      const batch = db.batch();
-
-      for (const item of chunk) {
-        const documentId = Buffer.from(item.sku).toString(
-          "base64url",
-        );
-
-        const ref = db
-          .collection("sbm_repricer_products")
-          .doc(documentId);
-
-        const updateData: Record<string, unknown> = {
-          minPrice: item.minPrice,
-          maxPrice: item.maxPrice,
-          pricingUpdatedAt: updatedAt,
-        };
-
-        if (repricingEnabled !== null) {
-          updateData.repricingEnabled = repricingEnabled;
-          updateData.repricingUpdatedAt = updatedAt;
-        }
-
-        batch.set(
-          ref,
-          updateData,
-          {
-            merge: true,
-          },
-        );
-      }
-
-      await batch.commit();
-    }
+    await batch.commit();
 
     return NextResponse.json({
       success: true,
-      updated: items.length,
-      repricingUpdated: repricingEnabled !== null,
+      updated: validatedItems.length,
       repricingEnabled,
+      pricingRule:
+        repricingEnabled === true
+          ? "BUY_BOX"
+          : null,
     });
   } catch (error) {
-    console.error("Bulk pricing save error:", error);
+    console.error(
+      "Bulk pricing save failed:",
+      error,
+    );
 
     return NextResponse.json(
       {
