@@ -1,3 +1,4 @@
+// src/lib/amazon-pricing.ts
 import {
     AMAZON_RATE_LIMITS,
     amazonFetchWithRetry,
@@ -13,6 +14,15 @@ import {
   export const SP_API_BASE = "https://sellingpartnerapi-na.amazon.com";
   
   export const USER_AGENT = "SBM-Repricer/0.1 (Language=TypeScript)";
+  
+  // getCompetitiveSummary accepts up to 40 requests per batch.
+  // Rate is 0.033 rps (one call per ~30s), so a bigger batch is
+  // the only way to cut wall-clock time.
+  export const NEW_BATCH_SIZE = 40;
+  
+  // getItemOffersBatch accepts up to 20 requests per batch
+  // at 0.1 rps (one call per ~10s).
+  export const USED_BATCH_SIZE = 20;
   
   // ============================================================
   // TYPES
@@ -205,7 +215,7 @@ import {
     const buyBoxes = new Map<string, BuyBox>();
     const errors: FetchError[] = [];
   
-    const batches = chunkArray([...new Set(asins)], 20);
+    const batches = chunkArray([...new Set(asins)], NEW_BATCH_SIZE);
   
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
       const batch = batches[batchIndex];
@@ -342,7 +352,7 @@ import {
     const buyBoxes = new Map<string, BuyBox>();
     const errors: FetchError[] = [];
   
-    const batches = chunkArray([...new Set(asins)], 20);
+    const batches = chunkArray([...new Set(asins)], USED_BATCH_SIZE);
   
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
       const batch = batches[batchIndex];
