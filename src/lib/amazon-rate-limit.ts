@@ -130,6 +130,8 @@ export async function amazonFetchWithRetry(
         response,
         rateLimitRps,
         nextDelayMs,
+        // How many 429/503 responses were retried before this one.
+        retries: attempt,
       };
     }
 

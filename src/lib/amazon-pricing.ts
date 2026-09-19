@@ -52,6 +52,8 @@ export type FetchError = {
 export type BuyBoxFetchResult = {
   buyBoxes: Map<string, BuyBox>;
   errors: FetchError[];
+  // 429/503 responses Amazon sent that were retried while fetching.
+  throttledRetries: number;
 };
 
 // ============================================================
@@ -214,13 +216,14 @@ export async function getNewBuyBoxes(
 ): Promise<BuyBoxFetchResult> {
   const buyBoxes = new Map<string, BuyBox>();
   const errors: FetchError[] = [];
+  let throttledRetries = 0;
 
   const batches = chunkArray([...new Set(asins)], NEW_BATCH_SIZE);
 
   for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
     const batch = batches[batchIndex];
 
-    const { response, rateLimitRps, nextDelayMs } =
+    const { response, rateLimitRps, nextDelayMs, retries } =
       await amazonFetchWithRetry(
         `${SP_API_BASE}/batches/products/pricing/2022-05-01/items/competitiveSummary`,
         {
@@ -248,6 +251,8 @@ export async function getNewBuyBoxes(
 
         AMAZON_RATE_LIMITS.competitiveSummary,
       );
+
+    throttledRetries += retries;
 
     const data = await response.json().catch(() => null);
 
@@ -331,7 +336,7 @@ export async function getNewBuyBoxes(
     }
   }
 
-  return { buyBoxes, errors };
+  return { buyBoxes, errors, throttledRetries };
 }
 
 // ============================================================
@@ -351,6 +356,7 @@ export async function getUsedBuyBoxes(
 ): Promise<BuyBoxFetchResult> {
   const buyBoxes = new Map<string, BuyBox>();
   const errors: FetchError[] = [];
+  let throttledRetries = 0;
 
   const batches = chunkArray([...new Set(asins)], USED_BATCH_SIZE);
 
@@ -358,7 +364,7 @@ export async function getUsedBuyBoxes(
     const batch = batches[batchIndex];
 
     // Uses the same retry/backoff path as the NEW branch.
-    const { response, rateLimitRps, nextDelayMs } =
+    const { response, rateLimitRps, nextDelayMs, retries } =
       await amazonFetchWithRetry(
         `${SP_API_BASE}/batches/products/pricing/v0/itemOffers`,
         {
@@ -388,6 +394,8 @@ export async function getUsedBuyBoxes(
 
         AMAZON_RATE_LIMITS.itemOffersBatch,
       );
+
+    throttledRetries += retries;
 
     const data = await response.json().catch(() => null);
 
@@ -504,7 +512,7 @@ export async function getUsedBuyBoxes(
     }
   }
 
-  return { buyBoxes, errors };
+  return { buyBoxes, errors, throttledRetries };
 }
 
 // ============================================================
@@ -619,12 +627,14 @@ export type SubmitPriceResult =
       ok: true;
       action: "PRICE_SUBMITTED";
       amazonResponse: any;
+      throttledRetries: number;
     }
   | {
       ok: false;
       action: "VALIDATION_FAILED" | "AMAZON_UPDATE_FAILED";
       statusCode: number;
       amazonResponse: any;
+      throttledRetries: number;
     };
 
 /**
@@ -659,7 +669,8 @@ export async function submitPrice(input: {
   validationUrl.searchParams.set("issueLocale", "en_US");
   validationUrl.searchParams.set("mode", "VALIDATION_PREVIEW");
 
-  const { response: validationResponse } = await amazonFetchWithRetry(
+  const { response: validationResponse, retries: validationRetries } =
+    await amazonFetchWithRetry(
     validationUrl.toString(),
     {
       method: "PATCH",
@@ -680,6 +691,7 @@ export async function submitPrice(input: {
       action: "VALIDATION_FAILED",
       statusCode: validationResponse.status,
       amazonResponse: validationData,
+      throttledRetries: validationRetries,
     };
   }
 
@@ -689,7 +701,8 @@ export async function submitPrice(input: {
   liveUrl.searchParams.set("marketplaceIds", MARKETPLACE_ID);
   liveUrl.searchParams.set("issueLocale", "en_US");
 
-  const { response: amazonResponse } = await amazonFetchWithRetry(
+  const { response: amazonResponse, retries: liveRetries } =
+    await amazonFetchWithRetry(
     liveUrl.toString(),
     {
       method: "PATCH",
@@ -710,6 +723,7 @@ export async function submitPrice(input: {
       action: "AMAZON_UPDATE_FAILED",
       statusCode: amazonResponse.status,
       amazonResponse: amazonData,
+      throttledRetries: validationRetries + liveRetries,
     };
   }
 
@@ -717,5 +731,6 @@ export async function submitPrice(input: {
     ok: true,
     action: "PRICE_SUBMITTED",
     amazonResponse: amazonData,
+    throttledRetries: validationRetries + liveRetries,
   };
 }

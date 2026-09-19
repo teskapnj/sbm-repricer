@@ -103,6 +103,10 @@ export type CycleResult = {
 
   fetchErrors: FetchError[];
 
+  // 429/503 responses from Amazon that were retried, split by phase.
+  // Nothing failed because of them; they cost time and rate-limit quota.
+  throttledRetries: { fetch: number; submit: number };
+
   items: CycleItem[];
 
   amazonUpdated: boolean;
@@ -152,6 +156,8 @@ function buildReportDocument(result: CycleResult, source: string) {
       liveSummary: result.liveSummary ?? null,
 
       fetchErrors: result.fetchErrors.slice(0, 20),
+
+      throttledRetries: result.throttledRetries,
 
       durationMs: result.durationMs,
 
@@ -308,6 +314,7 @@ export async function runRepricingCycle(options: {
       usedProducts: 0,
       counts: {},
       fetchErrors: [],
+      throttledRetries: { fetch: 0, submit: 0 },
       items: [],
       amazonUpdated: false,
       durationMs: Date.now() - startedAtMs,
@@ -344,6 +351,7 @@ export async function runRepricingCycle(options: {
       : Promise.resolve({
           buyBoxes: new Map<string, BuyBox>(),
           errors: [] as FetchError[],
+          throttledRetries: 0,
         }),
 
     usedAsins.length > 0
@@ -351,6 +359,7 @@ export async function runRepricingCycle(options: {
       : Promise.resolve({
           buyBoxes: new Map<string, BuyBox>(),
           errors: [] as FetchError[],
+          throttledRetries: 0,
         }),
   ]);
 
@@ -379,6 +388,8 @@ export async function runRepricingCycle(options: {
   const newBuyBoxes = newResult.buyBoxes;
   const usedBuyBoxes = usedResult.buyBoxes;
   const fetchErrors = [...newResult.errors, ...usedResult.errors];
+  const fetchRetries = newResult.throttledRetries + usedResult.throttledRetries;
+  let submitRetries = 0;
 
   const ourSellerId = process.env.AMAZON_SELLER_ID ?? null;
 
@@ -505,6 +516,7 @@ export async function runRepricingCycle(options: {
       usedProducts: usedAsins.length,
       counts: countActions(items),
       fetchErrors,
+      throttledRetries: { fetch: fetchRetries, submit: 0 },
       items,
       amazonUpdated: false,
       durationMs: Date.now() - startedAtMs,
@@ -574,6 +586,8 @@ export async function runRepricingCycle(options: {
         accessToken,
       });
 
+      submitRetries += submission.throttledRetries;
+
       if (!submission.ok) {
         item.action = submission.action;
         item.amazonStatusCode = submission.statusCode;
@@ -640,6 +654,7 @@ export async function runRepricingCycle(options: {
     },
 
     fetchErrors,
+    throttledRetries: { fetch: fetchRetries, submit: submitRetries },
     items,
 
     amazonUpdated: submitted > 0,

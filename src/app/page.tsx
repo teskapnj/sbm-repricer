@@ -76,6 +76,7 @@ type RepricingCycleLiveResponse = {
 type CycleChunkResponse = RepricingCycleLiveResponse & {
   durationMs?: number;
   fetchErrors?: unknown[];
+  throttledRetries?: { fetch: number; submit: number };
   chunk?: {
     index: number;
     total: number;
@@ -110,6 +111,8 @@ type RepricingRunSummary = {
   failed: number;
   durationMs: number | null;
   fetchErrors: number;
+  throttledFetch: number;
+  throttledSubmit: number;
 };
 
 async function fetchStoredProducts() {
@@ -367,6 +370,8 @@ export default function Home() {
       skipped: 0,
       failed: 0,
       fetchErrors: 0,
+      throttledFetch: 0,
+      throttledSubmit: 0,
     };
 
     let step = 0;
@@ -403,6 +408,9 @@ export default function Home() {
         totals.fetchErrors += Array.isArray(data.fetchErrors)
           ? data.fetchErrors.length
           : 0;
+
+        totals.throttledFetch += data.throttledRetries?.fetch ?? 0;
+        totals.throttledSubmit += data.throttledRetries?.submit ?? 0;
 
         step += 1;
 
@@ -1276,6 +1284,16 @@ export default function Home() {
                       ` • Failed: ${repricingResult.failed}`}
                     {repricingResult.durationMs !== null &&
                       ` • Took: ${(repricingResult.durationMs / 1000).toFixed(1)}s`}
+
+                    {repricingResult.throttledFetch +
+                      repricingResult.throttledSubmit >
+                      0 &&
+                      ` • Amazon throttled retries: ${
+                        repricingResult.throttledFetch +
+                        repricingResult.throttledSubmit
+                      } (read ${repricingResult.throttledFetch} / submit ${
+                        repricingResult.throttledSubmit
+                      })`}
 
                     {repricingResult.fetchErrors > 0 && (
                       <div className="mt-2 font-medium text-amber-700">
