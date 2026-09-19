@@ -72,6 +72,34 @@ type RepricingCycleLiveResponse = {
   error?: string;
 };
 
+// Response of a chunked call to /api/repricing-cycle-live or -preview.
+type CycleChunkResponse = RepricingCycleLiveResponse & {
+  durationMs?: number;
+  fetchErrors?: unknown[];
+  chunk?: {
+    index: number;
+    total: number;
+    totalActive: number;
+    nextCursor: string | null;
+    waitBeforeNextMs: number;
+  };
+};
+
+type RepricingProgress = {
+  step: number;
+  steps: number;
+  done: number;
+  total: number;
+  waiting: boolean;
+};
+
+// Wait before retrying a failed chunk: one full New Buy Box rate-limit window.
+const CHUNK_RETRY_WAIT_MS = 31_000;
+const MAX_CYCLE_STEPS = 500;
+
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 type RepricingRunSummary = {
   mode: "PREVIEW" | "LIVE";
   checked: number;
@@ -193,6 +221,8 @@ export default function Home() {
   const [repricingError, setRepricingError] = useState("");
   const [repricingResult, setRepricingResult] =
     useState<RepricingRunSummary | null>(null);
+  const [repricingProgress, setRepricingProgress] =
+    useState<RepricingProgress | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -281,54 +311,157 @@ export default function Home() {
     }
   }
 
-  async function runPreview() {
-    if (repricingRunning || syncing) return;
+  async function postCycleChunk(
+    endpoint: string,
+    cursor: string | null,
+    source: string,
+    confirmLive: boolean,
+  ) {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        source,
+        chunked: true,
+        cursor,
+        ...(confirmLive ? { confirm: "LIVE" } : {}),
+      }),
+      cache: "no-store",
+    });
+
+    const data = (await response
+      .json()
+      .catch(() => null)) as CycleChunkResponse | null;
+
+    if (!response.ok || !data) {
+      throw new Error(
+        data?.error || `Request failed (HTTP ${response.status}).`,
+      );
+    }
+
+    return data;
+  }
+
+  // Walks every product with Repricing ON, one chunk per request, so each
+  // request fits the server's time limit however large the inventory is.
+  async function runCycleInChunks(mode: "PREVIEW" | "LIVE") {
+    const endpoint =
+      mode === "LIVE"
+        ? "/api/repricing-cycle-live"
+        : "/api/repricing-cycle-preview";
+    const source = mode === "LIVE" ? "ui-live" : "ui-preview";
 
     setRepricingRunning(true);
     setRepricingError("");
     setRepricingResult(null);
+    setRepricingProgress(null);
+
+    const startedAtMs = Date.now();
+    const totals = {
+      checked: 0,
+      wouldUpdate: 0,
+      updated: 0,
+      noChange: 0,
+      skipped: 0,
+      failed: 0,
+      fetchErrors: 0,
+    };
+
+    let step = 0;
 
     try {
-      const response = await fetch("/api/repricing-cycle-preview", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ source: "ui-preview" }),
-        cache: "no-store",
-      });
+      let cursor: string | null = null;
+      let hasMore = true;
 
-      const data = (await response.json()) as any;
+      while (hasMore) {
+        let data: CycleChunkResponse;
 
-      if (!response.ok) {
-        throw new Error(data?.error || "Preview failed.");
-      }
+        try {
+          data = await postCycleChunk(endpoint, cursor, source, mode === "LIVE");
+        } catch {
+          // Retry a failed chunk once, after Amazon's rate-limit window.
+          setRepricingProgress((previous) =>
+            previous ? { ...previous, waiting: true } : previous,
+          );
+          await sleep(CHUNK_RETRY_WAIT_MS);
+          data = await postCycleChunk(endpoint, cursor, source, mode === "LIVE");
+        }
 
-      const counts = data.counts || {};
+        const counts = data.counts || {};
 
-      setRepricingResult({
-        mode: "PREVIEW",
-        checked: data.activeProducts ?? 0,
-        wouldUpdate: counts.wouldUpdate ?? 0,
-        updated: 0,
-        noChange: counts.noChange ?? 0,
-        skipped:
+        totals.checked += data.activeProducts ?? 0;
+        totals.wouldUpdate += counts.wouldUpdate ?? 0;
+        totals.updated += data.liveSummary?.submitted ?? 0;
+        totals.noChange += counts.noChange ?? 0;
+        totals.skipped +=
           (counts.skipped ?? 0) +
           (counts.fbmNeedsShipping ?? 0) +
-          (counts.invalidSetup ?? 0),
-        failed: 0,
-        durationMs: data.durationMs ?? null,
-        fetchErrors: Array.isArray(data.fetchErrors)
+          (counts.invalidSetup ?? 0);
+        totals.failed += data.liveSummary?.failed ?? 0;
+        totals.fetchErrors += Array.isArray(data.fetchErrors)
           ? data.fetchErrors.length
-          : 0,
+          : 0;
+
+        step += 1;
+
+        const chunk = data.chunk;
+        const nextCursor = chunk?.nextCursor ?? null;
+
+        setRepricingProgress({
+          step,
+          steps: chunk?.total ?? step,
+          done: totals.checked,
+          total: chunk?.totalActive ?? totals.checked,
+          waiting: false,
+        });
+
+        hasMore = nextCursor !== null;
+
+        if (hasMore) {
+          if (nextCursor === cursor || step >= MAX_CYCLE_STEPS) {
+            throw new Error("The chunk cursor stopped advancing.");
+          }
+
+          cursor = nextCursor;
+
+          const waitMs = chunk?.waitBeforeNextMs ?? 0;
+
+          if (waitMs > 0) {
+            setRepricingProgress((previous) =>
+              previous ? { ...previous, waiting: true } : previous,
+            );
+            await sleep(waitMs);
+          }
+        }
+      }
+
+      setRepricingResult({
+        mode,
+        ...totals,
+        durationMs: Date.now() - startedAtMs,
       });
     } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Repricing failed.";
+
       setRepricingError(
-        error instanceof Error ? error.message : "Preview failed.",
+        step > 0
+          ? `Stopped after ${totals.checked} products (step ${step}): ${message} ` +
+              "Products already processed keep their result."
+          : message,
       );
     } finally {
       setRepricingRunning(false);
+      setRepricingProgress(null);
     }
+  }
+
+  async function runPreview() {
+    if (repricingRunning || syncing) return;
+
+    await runCycleInChunks("PREVIEW");
   }
 
   async function runReprice() {
@@ -341,62 +474,23 @@ export default function Home() {
       return;
     }
 
+    // Worst case (every product is New): 20 ASINs per ~31 s Amazon window.
+    const estimatedMinutes = Math.max(
+      1,
+      Math.ceil((Math.ceil(enabledCount / 20) * 31) / 60),
+    );
+
     const confirmed = window.confirm(
       `Run LIVE repricing for ${enabledCount} product${
         enabledCount === 1 ? "" : "s"
-      } with Repricing ON? Amazon prices may change.`,
+      } with Repricing ON? Amazon prices may change.\n\n` +
+        `This can take up to ~${estimatedMinutes} min because of Amazon's rate limits. ` +
+        "Keep this tab open until it finishes.",
     );
 
     if (!confirmed) return;
 
-    setRepricingRunning(true);
-    setRepricingError("");
-    setRepricingResult(null);
-
-    try {
-      const response = await fetch("/api/repricing-cycle-live", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          confirm: "LIVE",
-        }),
-        cache: "no-store",
-      });
-
-      const data = (await response.json()) as RepricingCycleLiveResponse;
-
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || "Live repricing failed.");
-      }
-
-      const counts = data.counts || {};
-      const liveSummary = data.liveSummary || {};
-
-      setRepricingResult({
-        mode: "LIVE",
-        checked: data.activeProducts ?? enabledCount,
-        wouldUpdate: (counts as any).wouldUpdate ?? 0,
-        updated: liveSummary.submitted ?? 0,
-        noChange: counts.noChange ?? 0,
-        skipped:
-          (counts.skipped ?? 0) +
-          (counts.fbmNeedsShipping ?? 0) +
-          (counts.invalidSetup ?? 0),
-        failed: liveSummary.failed ?? 0,
-        durationMs: (data as any).durationMs ?? null,
-        fetchErrors: Array.isArray((data as any).fetchErrors)
-          ? (data as any).fetchErrors.length
-          : 0,
-      });
-    } catch (error) {
-      setRepricingError(
-        error instanceof Error ? error.message : "Live repricing failed.",
-      );
-    } finally {
-      setRepricingRunning(false);
-    }
+    await runCycleInChunks("LIVE");
   }
 
   function openEdit(product: Product) {
@@ -1120,8 +1214,42 @@ export default function Home() {
             {(repricingRunning || repricingError || repricingResult) && (
               <div className="mt-5 rounded-2xl border border-slate-200 bg-white px-5 py-4 text-sm shadow-sm">
                 {repricingRunning && (
-                  <div className="font-medium text-slate-700">
-                    Working on products with Repricing ON...
+                  <div>
+                    <div className="font-medium text-slate-700">
+                      {repricingProgress
+                        ? `Step ${repricingProgress.step} of ${repricingProgress.steps} • ` +
+                          `${repricingProgress.done} of ${repricingProgress.total} products` +
+                          (repricingProgress.waiting
+                            ? " • waiting for Amazon rate limit..."
+                            : "")
+                        : "Working on products with Repricing ON..."}
+                    </div>
+
+                    {repricingProgress && (
+                      <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
+                        <div
+                          className="h-full rounded-full bg-slate-900 transition-all"
+                          style={{
+                            width: `${
+                              repricingProgress.total > 0
+                                ? Math.min(
+                                    100,
+                                    Math.round(
+                                      (repricingProgress.done /
+                                        repricingProgress.total) *
+                                        100,
+                                    ),
+                                  )
+                                : 0
+                            }%`,
+                          }}
+                        />
+                      </div>
+                    )}
+
+                    <div className="mt-2 text-xs text-slate-500">
+                      Keep this tab open until it finishes.
+                    </div>
                   </div>
                 )}
 

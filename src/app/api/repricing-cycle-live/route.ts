@@ -23,7 +23,14 @@ export async function POST(request: NextRequest) {
     const source =
       typeof body?.source === "string" ? body.source : "manual-live";
 
-    const result = await runRepricingCycle({ live: true, source });
+    // {"chunked":true,"cursor":<last SKU of the previous chunk | null>} walks
+    // the inventory one chunk per call; without it everything runs in one call.
+    const chunk =
+      body?.chunked === true
+        ? { cursor: typeof body?.cursor === "string" ? body.cursor : null }
+        : undefined;
+
+    const result = await runRepricingCycle({ live: true, source, chunk });
 
     return NextResponse.json(result);
   } catch (error) {

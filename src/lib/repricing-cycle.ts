@@ -1,4 +1,5 @@
 import { db } from "@/lib/firebase-admin";
+import { AMAZON_RATE_LIMITS } from "@/lib/amazon-rate-limit";
 
 import {
   BuyBox,
@@ -19,6 +20,18 @@ const REPORTS_COLLECTION = "sbm_repricer_repricing_reports";
 
 // Amazon Listings Items PATCH is rate limited; keep this low.
 const SUBMIT_CONCURRENCY = 4;
+
+// A single invocation must finish inside the route's maxDuration (300 s).
+// New Buy Box fetching is paced at ~30 s per 20 ASINs, so a chunk is capped at
+// 100 products (5 batches, ~150 s) to leave room for the price submissions.
+export const CYCLE_CHUNK_SIZE = 100;
+
+// Same pacing the batch fetchers use between two calls (see
+// getAmazonRequestDelayMs): one full rate-limit window plus a 250 ms margin.
+const NEW_RATE_WINDOW_MS =
+  Math.ceil(1000 / AMAZON_RATE_LIMITS.competitiveSummary) + 250;
+const USED_RATE_WINDOW_MS =
+  Math.ceil(1000 / AMAZON_RATE_LIMITS.itemOffersBatch) + 250;
 
 export type CycleAction =
   | "WOULD_UPDATE"
@@ -56,10 +69,25 @@ export type CycleItem = {
   amazonResponse?: any;
 };
 
+export type CycleChunk = {
+  // 0-based position of this chunk and how many the whole run needs.
+  index: number;
+  total: number;
+  // Products that qualify for this run across all chunks.
+  totalActive: number;
+  // Pass back as `cursor` to get the next chunk; null when this was the last.
+  nextCursor: string | null;
+  // How long the caller should wait before requesting the next chunk so the
+  // first New/Used batch does not hit Amazon's rate limit (a 429 still costs quota).
+  waitBeforeNextMs: number;
+};
+
 export type CycleResult = {
   success: boolean;
   dryRun: boolean;
   live: boolean;
+
+  chunk?: CycleChunk;
 
   activeProducts: number;
   newProducts: number;
@@ -191,27 +219,90 @@ export async function saveRepricingReport(
   }
 }
 
+/**
+ * Picks the window of products for one chunk: products are ordered by SKU and
+ * the window starts right after `cursor` (null = from the start). Exported for
+ * testing; runRepricingCycle is the only production caller.
+ */
+export function planChunk<T extends { sku?: unknown }>(
+  products: T[],
+  cursor: string | null,
+  size: number = CYCLE_CHUNK_SIZE,
+) {
+  const skuOf = (product: T | undefined) =>
+    typeof product?.sku === "string" ? product.sku : "";
+
+  const ordered = [...products].sort((a, b) =>
+    skuOf(a) < skuOf(b) ? -1 : skuOf(a) > skuOf(b) ? 1 : 0,
+  );
+
+  const remaining =
+    cursor === null
+      ? ordered
+      : ordered.filter((product) => skuOf(product) > cursor);
+
+  const window = remaining.slice(0, size);
+
+  return {
+    products: window,
+    plan: {
+      index: Math.floor((ordered.length - remaining.length) / size),
+      total: Math.max(1, Math.ceil(ordered.length / size)),
+      totalActive: ordered.length,
+      nextCursor:
+        remaining.length > size ? skuOf(window[window.length - 1]) : null,
+    },
+  };
+}
+
+/**
+ * Runs one repricing cycle.
+ *
+ * Without `chunk` every qualifying product is processed in this call (cron,
+ * small catalogs). With `chunk` only the next CYCLE_CHUNK_SIZE products after
+ * `cursor` (ordered by SKU) are processed and `result.chunk` says how to ask
+ * for the following ones, so a caller can walk the whole inventory in several
+ * invocations that each fit inside maxDuration. The cursor is a SKU rather
+ * than an offset, so products toggled between chunks do not shift the window.
+ */
 export async function runRepricingCycle(options: {
   live: boolean;
   source: string;
+  chunk?: { cursor: string | null };
 }): Promise<CycleResult> {
   const startedAtMs = Date.now();
-  const { live, source } = options;
+  const { live, chunk } = options;
 
   const snapshot = await db
     .collection(PRODUCTS_COLLECTION)
     .where("repricingEnabled", "==", true)
     .get();
 
-  const activeProducts = snapshot.docs
+  const qualifyingProducts = snapshot.docs
     .map((doc) => doc.data())
     .filter((product) => product?.pricingRule === "BUY_BOX");
+
+  let activeProducts = qualifyingProducts;
+  let chunkPlan: Omit<CycleChunk, "waitBeforeNextMs"> | null = null;
+
+  if (chunk) {
+    const planned = planChunk(qualifyingProducts, chunk.cursor);
+
+    activeProducts = planned.products;
+    chunkPlan = planned.plan;
+  }
+
+  // Tell a multi-chunk run apart in the reports list.
+  const source = chunkPlan
+    ? `${options.source} (part ${chunkPlan.index + 1}/${chunkPlan.total})`
+    : options.source;
 
   if (activeProducts.length === 0) {
     const emptyResult: CycleResult = {
       success: true,
       dryRun: !live,
       live,
+      chunk: chunkPlan ? { ...chunkPlan, waitBeforeNextMs: 0 } : undefined,
       activeProducts: 0,
       newProducts: 0,
       usedProducts: 0,
@@ -262,6 +353,28 @@ export async function runRepricingCycle(options: {
           errors: [] as FetchError[],
         }),
   ]);
+
+  const fetchDoneAtMs = Date.now();
+
+  // The next chunk starts with a fresh burst-of-1 call, so it must not go out
+  // before the rate-limit window of the last call in this chunk has passed.
+  // Time spent submitting prices below already counts towards that window.
+  const rateWindowMs =
+    newAsins.length > 0
+      ? NEW_RATE_WINDOW_MS
+      : usedAsins.length > 0
+        ? USED_RATE_WINDOW_MS
+        : 0;
+
+  const chunkResult = (): CycleChunk | undefined =>
+    chunkPlan
+      ? {
+          ...chunkPlan,
+          waitBeforeNextMs: chunkPlan.nextCursor
+            ? Math.max(0, rateWindowMs - (Date.now() - fetchDoneAtMs))
+            : 0,
+        }
+      : undefined;
 
   const newBuyBoxes = newResult.buyBoxes;
   const usedBuyBoxes = usedResult.buyBoxes;
@@ -386,6 +499,7 @@ export async function runRepricingCycle(options: {
       success: fetchErrors.length === 0,
       dryRun: true,
       live: false,
+      chunk: chunkResult(),
       activeProducts: activeProducts.length,
       newProducts: newAsins.length,
       usedProducts: usedAsins.length,
@@ -510,6 +624,8 @@ export async function runRepricingCycle(options: {
     success: failed === 0 && fetchErrors.length === 0,
     dryRun: false,
     live: true,
+
+    chunk: chunkResult(),
 
     activeProducts: activeProducts.length,
     newProducts: newAsins.length,

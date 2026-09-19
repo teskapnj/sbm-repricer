@@ -12,7 +12,13 @@ export async function POST(request: NextRequest) {
     const source =
       typeof body?.source === "string" ? body.source : "manual-preview";
 
-    const result = await runRepricingCycle({ live: false, source });
+    // See repricing-cycle-live: chunked=true processes one chunk per call.
+    const chunk =
+      body?.chunked === true
+        ? { cursor: typeof body?.cursor === "string" ? body.cursor : null }
+        : undefined;
+
+    const result = await runRepricingCycle({ live: false, source, chunk });
 
     return NextResponse.json(result);
   } catch (error) {
