@@ -574,13 +574,24 @@ export function computeTarget(input: {
 // PRICE SUBMISSION
 // ============================================================
 
+// Legacy product types that the Listings API rejects (error 4000003) even
+// though the catalog still reports them. Amazon's Product Type Definitions
+// API resolves ABIS_DVD to PRODUCT, and VALIDATION_PREVIEW accepts PRODUCT.
+const LISTINGS_PRODUCT_TYPE_ALIASES: Record<string, string> = {
+  ABIS_DVD: "PRODUCT",
+};
+
+export function resolveListingsProductType(productType: string) {
+  return LISTINGS_PRODUCT_TYPE_ALIASES[productType] ?? productType;
+}
+
 export function buildPricePayload(
   productType: string,
   price: number,
   operation: "replace" | "merge",
 ) {
   return {
-    productType,
+    productType: resolveListingsProductType(productType),
 
     patches: [
       {
