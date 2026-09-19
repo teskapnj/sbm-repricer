@@ -89,6 +89,16 @@ function resultLabel(item: any, liveResult: any) {
     return "Skipped";
   }
 
+  // Reports written by the current cycle carry the outcome on the item itself.
+  if (item?.action === "PRICE_SUBMITTED") return "Updated";
+
+  if (
+    item?.action === "VALIDATION_FAILED" ||
+    item?.action === "AMAZON_UPDATE_FAILED"
+  ) {
+    return "Failed";
+  }
+
   if (item?.action === "WOULD_UPDATE") {
     if (
       liveResult?.success === true &&
@@ -390,14 +400,20 @@ export default function ReportsPage() {
                                     ? item.currentPrice
                                     : null;
 
+                                // A submitted price is the new price too;
+                                // failed submissions keep the old one.
                                 const after =
                                   item?.action ===
-                                  "WOULD_UPDATE"
+                                    "WOULD_UPDATE" ||
+                                  item?.action ===
+                                    "PRICE_SUBMITTED"
                                     ? item?.targetLandedPrice
                                     : before;
 
+                                // Stored reports keep the Buy Box price flat.
                                 const market =
-                                  item?.buyBox?.landedPrice;
+                                  item?.buyBox?.landedPrice ??
+                                  item?.buyBoxLandedPrice;
 
                                 const label =
                                   resultLabel(
